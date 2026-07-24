@@ -1,0 +1,12 @@
+{
+  "name": "chatbot-artescenic",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot de WhatsApp para inscripciones a la obra Jesus de Nazaret - Centro de Artes Escenicas Artescenic. Corre en Vercel + Supabase.",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.107.0"
+  }
+}
