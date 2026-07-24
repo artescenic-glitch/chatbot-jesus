@@ -15,6 +15,20 @@ module.exports = {
 
   algoMas: "¿Necesitas algo más? 👇",
 
+  // --- Menu principal (mensaje de lista, 4 opciones) ---
+  menuBoton: "Ver opciones",
+  menuOpciones: [
+    { id: "inscripcion", title: "📝 Inscripción" },
+    { id: "informacion", title: "ℹ️ Información" },
+    { id: "ubicacion", title: "📍 Ubicación" },
+    { id: "humano", title: "🙋 Hablar con persona" },
+  ],
+
+  // --- Derivacion a un humano ---
+  handoff:
+    "🙋 Con gusto. Te comunico con una persona del equipo — en breve te responderá por aquí. 🙂\n\n" +
+    "(Si quieres volver al menú automático en cualquier momento, escribe *menu*.)",
+
   // --- Flujo de inscripcion (preguntas paso a paso) ---
   pedirNombre:
     "¡Genial! Vamos con tu inscripción. 📝\n\nPor favor, escribe tu *nombre completo*:",

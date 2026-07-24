@@ -5,12 +5,15 @@
  *  - GET  : Meta verifica el webhook (usa VERIFY_TOKEN).
  *  - POST : llegan los mensajes de los usuarios.
  *
- *  El estado de cada conversacion se guarda en Supabase
- *  (bot_sessions) porque Vercel no mantiene memoria entre
- *  mensajes.
+ *  Cada mensaje entrante se REENVIA al CRM (para que puedas
+ *  responder consultas como humano desde el inbox del CRM).
+ *  El bot atiende las inscripciones automaticamente y, si el
+ *  usuario elige "Hablar con persona", se calla y deja que un
+ *  humano responda desde el CRM.
  * ============================================================
  */
 
+const crypto = require("crypto");
 const { sendText, sendButtons, sendList } = require("../lib/wa");
 const {
   getSession,
@@ -21,6 +24,8 @@ const {
 const C = require("../contenido");
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const CRM_WEBHOOK_URL = process.env.CRM_WEBHOOK_URL; // opcional
+const META_APP_SECRET = process.env.META_APP_SECRET; // opcional (para firmar el reenvio)
 
 module.exports = async (req, res) => {
   // ---------- Verificacion del webhook (GET) ----------
@@ -37,6 +42,10 @@ module.exports = async (req, res) => {
   // ---------- Mensajes entrantes (POST) ----------
   if (req.method === "POST") {
     try {
+      // 1) Reenviar copia al CRM (para el inbox humano)
+      await forwardToCRM(req.body);
+
+      // 2) Logica del bot
       const value = req.body?.entry?.[0]?.changes?.[0]?.value;
       const msg = value?.messages?.[0];
       if (msg) {
@@ -51,12 +60,34 @@ module.exports = async (req, res) => {
     } catch (e) {
       console.error("Error procesando webhook:", e);
     }
-    // Siempre respondemos 200 para que Meta no reintente ni desactive el webhook.
     return res.status(200).send("OK");
   }
 
   return res.status(200).send("Bot de Artescenic activo 🎭");
 };
+
+// ============================================================
+//  REENVIO AL CRM (con firma HMAC que el CRM exige)
+// ============================================================
+async function forwardToCRM(payload) {
+  if (!CRM_WEBHOOK_URL || !META_APP_SECRET || !payload) return;
+  try {
+    const body = JSON.stringify(payload);
+    const signature =
+      "sha256=" +
+      crypto.createHmac("sha256", META_APP_SECRET).update(body).digest("hex");
+    await fetch(CRM_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": signature,
+      },
+      body,
+    });
+  } catch (e) {
+    console.error("forwardToCRM error:", e.message);
+  }
+}
 
 // ============================================================
 //  LOGICA DEL BOT
@@ -68,6 +99,16 @@ async function handleMessage(from, text, replyId) {
   const session = await getSession(from);
   const step = session?.step;
   const data = session?.data || {};
+
+  // ----- Modo humano: el bot se calla y responde una persona -----
+  if (step === "humano") {
+    // Palabras para volver al bot automatico
+    if (/^(menu|menú|bot|inicio|volver|salir|automático|automatico)$/.test(low)) {
+      await clearSession(from);
+      return menu(from, C.bienvenida);
+    }
+    return; // silencio: el humano atiende desde el CRM
+  }
 
   // ----- Flujo de inscripcion (tiene prioridad) -----
   if (step === "nombre") {
@@ -131,15 +172,18 @@ async function handleMessage(from, text, replyId) {
     await sendText(from, C.ubicacion);
     return menu(from, C.algoMas);
   }
+  if (
+    replyId === "humano" ||
+    /asesor|persona|humano|hablar con|consulta|ayuda|pregunt/.test(low)
+  ) {
+    await saveSession(from, "humano", {});
+    return sendText(from, C.handoff);
+  }
 
   // ----- Cualquier otra cosa: saludo + menu -----
   return menu(from, C.bienvenida);
 }
 
 function menu(to, texto) {
-  return sendButtons(to, texto, [
-    { id: "inscripcion", title: "📝 Inscripción" },
-    { id: "informacion", title: "ℹ️ Información" },
-    { id: "ubicacion", title: "📍 Ubicación" },
-  ]);
+  return sendList(to, texto, C.menuBoton, C.menuOpciones);
 }
