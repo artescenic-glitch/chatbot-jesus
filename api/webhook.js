@@ -5,16 +5,19 @@
  *  - GET  : Meta verifica el webhook (usa VERIFY_TOKEN).
  *  - POST : llegan los mensajes de los usuarios.
  *
- *  Cada mensaje entrante se REENVIA al CRM (para que puedas
- *  responder consultas como humano desde el inbox del CRM).
- *  El bot atiende las inscripciones automaticamente y, si el
- *  usuario elige "Hablar con persona", se calla y deja que un
- *  humano responda desde el CRM.
+ *  CAMPAÑA ACTUAL: venta de entradas de LORQUIANAS en Escénika.
+ *  Todo mensaje sin intencion clara termina llevando a la web.
+ *  Si el mensaje viene de un anuncio de Meta (click-to-WhatsApp),
+ *  respondemos directo con el QR y el link, sin hacerle elegir nada.
+ *
+ *  Cada mensaje entrante se REENVIA al CRM (para responder como
+ *  humano desde su inbox). Si la persona elige "Hablar con
+ *  alguien", el bot se calla hasta que escriba "menu".
  * ============================================================
  */
 
 const crypto = require("crypto");
-const { sendText, sendButtons, sendList } = require("../lib/wa");
+const { sendText, sendImage, sendButtons, sendList } = require("../lib/wa");
 const {
   getSession,
   saveSession,
@@ -55,7 +58,9 @@ module.exports = async (req, res) => {
           msg.interactive?.button_reply?.id ||
           msg.interactive?.list_reply?.id ||
           null;
-        await handleMessage(from, text, replyId);
+        // Viene de un anuncio de Facebook/Instagram (click-to-WhatsApp)
+        const desdeAnuncio = Boolean(msg.referral);
+        await handleMessage(from, text, replyId, desdeAnuncio);
       }
     } catch (e) {
       console.error("Error procesando webhook:", e);
@@ -63,7 +68,7 @@ module.exports = async (req, res) => {
     return res.status(200).send("OK");
   }
 
-  return res.status(200).send("Bot de Artescenic activo 🎭");
+  return res.status(200).send("Bot de Escénika activo 🎭");
 };
 
 // ============================================================
@@ -92,7 +97,7 @@ async function forwardToCRM(payload) {
 // ============================================================
 //  LOGICA DEL BOT
 // ============================================================
-async function handleMessage(from, text, replyId) {
+async function handleMessage(from, text, replyId, desdeAnuncio) {
   const input = (replyId || text || "").trim();
   const low = input.toLowerCase();
 
@@ -102,7 +107,6 @@ async function handleMessage(from, text, replyId) {
 
   // ----- Modo humano: el bot se calla y responde una persona -----
   if (step === "humano") {
-    // Palabras para volver al bot automatico
     if (/^(menu|menú|bot|inicio|volver|salir|automático|automatico)$/.test(low)) {
       await clearSession(from);
       return menu(from, C.bienvenida);
@@ -110,7 +114,7 @@ async function handleMessage(from, text, replyId) {
     return; // silencio: el humano atiende desde el CRM
   }
 
-  // ----- Flujo de inscripcion (tiene prioridad) -----
+  // ----- Flujo de inscripcion en curso (tiene prioridad) -----
   if (step === "nombre") {
     data.nombre = input;
     await saveSession(from, "edad", data);
@@ -124,7 +128,13 @@ async function handleMessage(from, text, replyId) {
   if (step === "telefono") {
     data.telefono = input;
     await saveSession(from, "rol", data);
-    return sendList(from, C.pedirRolTexto, "Ver áreas", C.roles);
+    return sendList(
+      from,
+      C.pedirRolTexto,
+      C.pedirRolBoton,
+      C.roles,
+      C.pedirRolTitulo
+    );
   }
   if (step === "rol") {
     data.rol = C.rolesLabels[input] || input;
@@ -135,8 +145,7 @@ async function handleMessage(from, text, replyId) {
     ]);
   }
   if (step === "experiencia") {
-    data.experiencia =
-      input === "exp_si" || /^s[ií]/.test(low) ? "Sí" : "No";
+    data.experiencia = input === "exp_si" || /^s[ií]/.test(low) ? "Sí" : "No";
     await saveSession(from, "horario", data);
     return sendButtons(from, C.pedirHorario, [
       { id: "10:00", title: "10:00" },
@@ -159,31 +168,120 @@ async function handleMessage(from, text, replyId) {
     return sendText(from, C.gracias);
   }
 
-  // ----- Menu principal -----
-  if (replyId === "inscripcion" || /inscrib|inscrip|registr|anotar/.test(low)) {
+  // ----- Llega desde el anuncio: al grano, QR + link -----
+  if (desdeAnuncio) {
+    await olvidarFallos(from, step);
+    return enviarCompra(from);
+  }
+
+  // ----- Volver al menu -----
+  if (/^(menu|menú|hola|buenas|buenos días|buenas tardes|buenas noches)$/.test(low)) {
+    await olvidarFallos(from, step);
+    return menu(from, C.bienvenida);
+  }
+
+  // ----- LO PRINCIPAL: comprar entradas -----
+  if (
+    replyId === "comprar" ||
+    // ojo: nada de "cuanto" suelto, que se lleva "¿cuánto dura la obra?"
+    /entrada|boleto|ticket|comprar|compro|precio|cuesta|vale|sale|valor|reserv|butaca|asiento|disponib/.test(
+      low
+    )
+  ) {
+    await olvidarFallos(from, step);
+    return enviarCompra(from);
+  }
+
+  // ----- Lugar, fechas y horarios -----
+  // Va ANTES que "la obra": "¿dónde es la obra?" pregunta por el lugar.
+  if (
+    replyId === "lugar" ||
+    /lugar|d[oó]nde|donde|ubic|direcci|teatro|mapa|hora|horario|fecha|d[ií]a|cu[aá]ndo|cuando|septiembre/.test(
+      low
+    )
+  ) {
+    await olvidarFallos(from, step);
+    await sendText(from, C.lugar);
+    return seguirComprando(from);
+  }
+
+  // ----- Sobre la obra -----
+  if (
+    replyId === "obra" ||
+    /obra|lorquiana|lorca|trata|elenco|actrices|espect[aá]culo|duraci[oó]n|dura/.test(
+      low
+    )
+  ) {
+    await olvidarFallos(from, step);
+    await sendText(from, C.obra);
+    return seguirComprando(from);
+  }
+
+  // ----- Formas de pago -----
+  if (
+    replyId === "pago" ||
+    /pago|pagar|qr|transferen|dep[oó]sito|efectivo|tarjeta|banco|comprobante/.test(
+      low
+    )
+  ) {
+    await olvidarFallos(from, step);
+    await sendText(from, C.pago);
+    return seguirComprando(from);
+  }
+
+  // ----- Inscripciones (Jesús de Nazaret): ya no esta en el menu -----
+  if (/inscrib|inscrip|casting|audici|quiero actuar|ser parte del elenco/.test(low)) {
     await saveSession(from, "nombre", {});
     return sendText(from, C.pedirNombre);
   }
-  if (replyId === "informacion" || /informaci|info|detalle/.test(low)) {
-    await sendText(from, C.informacion);
-    return menu(from, C.algoMas);
-  }
-  if (replyId === "ubicacion" || /ubic|direcci|d[oó]nde|lugar|mapa/.test(low)) {
-    await sendText(from, C.ubicacion);
-    return menu(from, C.algoMas);
-  }
-  if (
-    replyId === "humano" ||
-    /asesor|persona|humano|hablar con|consulta|ayuda|pregunt/.test(low)
-  ) {
+
+  // ----- Pedir una persona -----
+  if (replyId === "humano" || /asesor|persona|humano|hablar con|atenci[oó]n/.test(low)) {
     await saveSession(from, "humano", {});
     return sendText(from, C.handoff);
   }
 
-  // ----- Cualquier otra cosa: saludo + menu -----
-  return menu(from, C.bienvenida);
+  // ----- No entendimos: menu; si insiste, lo pasamos a un humano -----
+  const fallos = (data.fallos || 0) + 1;
+  if (fallos >= 2) {
+    await saveSession(from, "humano", {});
+    return sendText(from, C.noEntiendoInsiste);
+  }
+  await saveSession(from, "menu", { fallos });
+  return menu(from, C.noEntiendo);
+}
+
+// ============================================================
+//  BLOQUES DE RESPUESTA
+// ============================================================
+
+// El mensaje estrella: imagen del QR + pie con el link.
+// Si WhatsApp no logra bajar la imagen, mandamos solo el texto.
+async function enviarCompra(to) {
+  const ok = await sendImage(to, C.QR_IMAGEN, C.comprarCaption);
+  if (!ok) await sendText(to, C.comprarSinImagen);
+  // Ya tiene el link: le ofrecemos lo que suele preguntar despues.
+  return sendButtons(to, C.algoMas, [
+    { id: "lugar", title: "📍 Lugar y fechas" },
+    { id: "obra", title: "🎭 Sobre la obra" },
+    { id: "humano", title: "🙋 Necesito ayuda" },
+  ]);
+}
+
+// Despues de contar algo, siempre se vuelve a la venta.
+// Ojo: los titulos de boton admiten 20 caracteres como maximo.
+function seguirComprando(to) {
+  return sendButtons(to, C.algoMas, [
+    { id: "comprar", title: "🎟️ Comprar" },
+    { id: "humano", title: "🙋 Necesito ayuda" },
+  ]);
 }
 
 function menu(to, texto) {
-  return sendList(to, texto, C.menuBoton, C.menuOpciones);
+  return sendList(to, texto, C.menuBoton, C.menuOpciones, C.menuTitulo);
+}
+
+// Borra el contador de "no entendi" cuando la conversacion retoma el rumbo
+async function olvidarFallos(from, step) {
+  if (step === "menu") await clearSession(from);
 }
